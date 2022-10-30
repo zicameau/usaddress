@@ -1,13 +1,24 @@
-import os
-import pycrfsuite
-import json
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
 
-ROOT_DIR = os.path.split(os.path.abspath(__file__))[0]
-US_VALID_ZIPCODES_FILENAME = 'USCitiesi_Zip_Keys.json'
-US_VALID_ZIPCODES = None
-US_VALID_ZIP_CODES_PATH = os.path.join(ROOT_DIR, 'static', US_VALID_ZIPCODES_FILENAME) 
-with open(US_VALID_ZIP_CODES_PATH) as all_zips:
-    US_VALID_ZIPCODES = json.load(all_zips)
+from __future__ import print_function
+from builtins import zip
+from builtins import str
+import os
+import string
+import re
+try:
+    from collections import OrderedDict
+except ImportError:
+    from ordereddict import OrderedDict
+import warnings
+
+import pycrfsuite
+import probableparsing
+
+# The address components are based upon the `United States Thoroughfare,
+# Landmark, and Postal Address Data Standard
+# http://www.urisa.org/advocacy/united-states-thoroughfare-landmark-and-postal-address-data-standard
 
 LABELS = [
     'AddressNumberPrefix',
@@ -42,13 +53,12 @@ PARENT_LABEL = 'AddressString'
 GROUP_LABEL = 'AddressCollection'
 
 MODEL_FILE = 'usaddr.crfsuite'
-MODEL_PATH = os.path.join(ROOT_DIR, MODEL_FILE)
+MODEL_PATH = os.path.split(os.path.abspath(__file__))[0] + '/' + MODEL_FILE
 
 DIRECTIONS = set(['n', 's', 'e', 'w',
                   'ne', 'nw', 'se', 'sw',
                   'north', 'south', 'east', 'west',
                   'northeast', 'northwest', 'southeast', 'southwest'])
-
 
 STREET_NAMES = {
     'allee', 'alley', 'ally', 'aly', 'anex', 'annex', 'annx', 'anx',
@@ -124,6 +134,7 @@ STREET_NAMES = {
     'xg', 'xing', 'xrd', 'xrds'
 }
 
+
 try:
     TAGGER = pycrfsuite.Tagger()
     TAGGER.open(MODEL_PATH)
@@ -131,3 +142,160 @@ except IOError:
     warnings.warn('You must train the model (parserator train --trainfile '
                   'FILES) to create the %s file before you can use the parse '
                   'and tag methods' % MODEL_FILE)
+
+
+def parse(address_string):
+    tokens = tokenize(address_string)
+
+    if not tokens:
+        return []
+
+    features = tokens2features(tokens)
+
+    tags = TAGGER.tag(features)
+    return list(zip(tokens, tags))
+
+
+def tag(address_string, tag_mapping=None):
+    tagged_address = OrderedDict()
+
+    last_label = None
+    is_intersection = False
+    og_labels = []
+
+    for token, label in parse(address_string):
+        if label == 'IntersectionSeparator':
+            is_intersection = True
+        if 'StreetName' in label and is_intersection:
+            label = 'Second' + label
+
+        # saving old label
+        og_labels.append(label)
+        # map tag to a new tag if tag mapping is provided
+        if tag_mapping and tag_mapping.get(label):
+            label = tag_mapping.get(label)
+        else:
+            label = label
+
+        if label == last_label:
+            tagged_address[label].append(token)
+        elif label not in tagged_address:
+            tagged_address[label] = [token]
+        else:
+            raise RepeatedLabelError(address_string, parse(address_string),
+                                     label)
+
+        last_label = label
+
+    for token in tagged_address:
+        component = ' '.join(tagged_address[token])
+        component = component.strip(" ,;")
+        tagged_address[token] = component
+
+    if 'AddressNumber' in og_labels and not is_intersection:
+        address_type = 'Street Address'
+    elif is_intersection and 'AddressNumber' not in og_labels:
+        address_type = 'Intersection'
+    elif 'USPSBoxID' in og_labels:
+        address_type = 'PO Box'
+    else:
+        address_type = 'Ambiguous'
+
+    return tagged_address, address_type
+
+
+def tokenize(address_string):
+    if isinstance(address_string, bytes):
+        address_string = str(address_string, encoding='utf-8')
+    address_string = re.sub('(&#38;)|(&amp;)', '&', address_string)
+    re_tokens = re.compile(r"""
+    \(*\b[^\s,;#&()]+[.,;)\n]*   # ['ab. cd,ef '] -> ['ab.', 'cd,', 'ef']
+    |
+    [#&]                       # [^'#abc'] -> ['#']
+    """,
+                           re.VERBOSE | re.UNICODE)
+
+    tokens = re_tokens.findall(address_string)
+
+    if not tokens:
+        return []
+
+    return tokens
+
+
+def tokenFeatures(token):
+    if token in (u'&', u'#', u'½'):
+        token_clean = token
+    else:
+        token_clean = re.sub(r'(^[\W]*)|([^.\w]*$)', u'', token,
+                             flags=re.UNICODE)
+
+    token_abbrev = re.sub(r'[.]', u'', token_clean.lower())
+    features = {
+        'abbrev': token_clean[-1] == u'.',
+        'digits': digits(token_clean),
+        'word': (token_abbrev
+                 if not token_abbrev.isdigit()
+                 else False),
+        'trailing.zeros': (trailingZeros(token_abbrev)
+                           if token_abbrev.isdigit()
+                           else False),
+        'length': (u'd:' + str(len(token_abbrev))
+                   if token_abbrev.isdigit()
+                   else u'w:' + str(len(token_abbrev))),
+        'endsinpunc': (token[-1]
+                       if bool(re.match('.+[^.\w]', token, flags=re.UNICODE))
+                       else False),
+        'directional': token_abbrev in DIRECTIONS,
+        'street_name': token_abbrev in STREET_NAMES,
+        'has.vowels': bool(set(token_abbrev[1:]) & set('aeiou')),
+    }
+
+    return features
+
+
+def tokens2features(address):
+    feature_sequence = [tokenFeatures(address[0])]
+    previous_features = feature_sequence[-1].copy()
+
+    for token in address[1:]:
+        token_features = tokenFeatures(token)
+        current_features = token_features.copy()
+
+        feature_sequence[-1]['next'] = current_features
+        token_features['previous'] = previous_features
+
+        feature_sequence.append(token_features)
+
+        previous_features = current_features
+
+    feature_sequence[0]['address.start'] = True
+    feature_sequence[-1]['address.end'] = True
+
+    if len(feature_sequence) > 1:
+        feature_sequence[1]['previous']['address.start'] = True
+        feature_sequence[-2]['next']['address.end'] = True
+
+    return feature_sequence
+
+
+def digits(token):
+    if token.isdigit():
+        return 'all_digits'
+    elif set(token) & set(string.digits):
+        return 'some_digits'
+    else:
+        return 'no_digits'
+
+
+def trailingZeros(token):
+    results = re.findall(r'(0+)$', token)
+    if results:
+        return results[0]
+    else:
+        return ''
+
+
+class RepeatedLabelError(probableparsing.RepeatedLabelError):
+    REPO_URL = 'https://github.com/datamade/usaddress/issues/new'
+    DOCS_URL = 'https://usaddress.readthedocs.io/'
