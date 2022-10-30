@@ -3,7 +3,7 @@ import pycrfsuite
 import json
 
 ROOT_DIR = os.path.split(os.path.abspath(__file__))[0]
-US_VALID_ZIPCODES_FILENAME = 'USCitiesi_Zip_Keys.json'
+US_VALID_ZIPCODES_FILENAME = 'USCities_Zip_Keys.json'
 US_VALID_ZIPCODES = None
 US_VALID_ZIP_CODES_PATH = os.path.join(ROOT_DIR, 'static', US_VALID_ZIPCODES_FILENAME) 
 with open(US_VALID_ZIP_CODES_PATH) as all_zips:
