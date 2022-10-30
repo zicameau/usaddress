@@ -14,7 +14,7 @@ except ImportError:
     from ordereddict import OrderedDict
 import warnings
 
-from ..definitions import LABELS, PARENT_LABEL, GROUP_LABEL, MODEL_FILE, MODEL_PATH, DIRECTIONS, STREET_NAMES, TAGGER, US_VALID_ZIPCODES
+from definitions import LABELS, PARENT_LABEL, GROUP_LABEL, MODEL_FILE, MODEL_PATH, DIRECTIONS, STREET_NAMES, TAGGER, US_VALID_ZIPCODES
 
 import pycrfsuite
 import probableparsing

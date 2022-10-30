@@ -1,1 +1,3 @@
-from .usaddress_source import usaddress
+import definitions
+
+from usaddress_source import usaddress
